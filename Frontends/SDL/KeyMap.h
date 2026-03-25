@@ -6,19 +6,17 @@
 //
 // See https://mozilla.org/MPL/2.0 for license information
 // -----------------------------------------------------------------------------
-/// @file
 
 #pragma once
 
 #include "BasicTypes.h"
+
 #include <SDL3/SDL_scancode.h>
 #include <unordered_map>
 
 namespace vamiga {
 
-// Maps SDL physical scancodes to Amiga keyboard scancodes (KeyCode = u8).
-// Amiga keycodes follow the hardware keyboard matrix layout.
-// Reference: vAmigaWeb/js/vAmiga_keyboard.js, Amiga Hardware Reference Manual.
+// SDL scancode to Amiga keyboard scancode mapping
 
 inline const std::unordered_map<SDL_Scancode, u8> sdlToAmiga = {
 

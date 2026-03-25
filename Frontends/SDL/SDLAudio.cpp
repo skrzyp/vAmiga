@@ -6,7 +6,9 @@
 //
 // See https://mozilla.org/MPL/2.0 for license information
 // -----------------------------------------------------------------------------
+/// @file
 
+#include "config.h"
 #include "SDLAudio.h"
 #include <algorithm>
 #include <cstring>
@@ -69,6 +71,12 @@ SDLAudio::shutdown()
     emu.store(nullptr);
 }
 
+void
+SDLAudio::flush()
+{
+    if (stream) SDL_ClearAudioStream(stream);
+}
+
 void SDLCALL
 SDLAudio::callback(void *userdata, SDL_AudioStream *stream,
                    int additionalAmount, int /*totalAmount*/)
@@ -82,7 +90,7 @@ SDLAudio::callback(void *userdata, SDL_AudioStream *stream,
     // additionalAmount is in bytes. Each frame = 2 floats = 8 bytes.
     isize frames = static_cast<isize>(additionalAmount) / static_cast<isize>(2 * sizeof(float));
     if (frames <= 0) return;
-    frames = std::min(frames, static_cast<isize>(kMaxFrames));
+    frames = std::min(frames, static_cast<isize>(maxFrames));
 
     isize copied = emulator->audioPort.copyInterleaved(self->buffer.data(), frames);
 

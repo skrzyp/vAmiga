@@ -6,11 +6,11 @@
 //
 // See https://mozilla.org/MPL/2.0 for license information
 // -----------------------------------------------------------------------------
-/// @file
 
 #pragma once
 
 #include "VAmiga.h"
+
 #include <SDL3/SDL.h>
 #include <array>
 #include <atomic>
@@ -19,28 +19,22 @@ namespace vamiga {
 
 class SDLAudio {
 
-    //
-    // Members
-    //
-
     SDL_AudioStream *stream = nullptr;
     std::atomic<VAmiga *> emu {nullptr};
 
-    // Persistent buffer to avoid stack allocation in the audio callback
-    static constexpr int kMaxFrames = 4096;
-    std::array<float, kMaxFrames * 2> buffer {};
+    // Persistent buffer (avoids stack allocation in the audio callback)
+    static constexpr int maxFrames = 4096;
+    std::array<float, maxFrames * 2> buffer {};
 
 public:
 
     SDLAudio() = default;
+    ~SDLAudio();
 
-    // Non-copyable, non-movable (owns SDL resources)
     SDLAudio(const SDLAudio &) = delete;
     SDLAudio(SDLAudio &&) = delete;
-    SDLAudio &operator=(const SDLAudio &) = delete;
-    SDLAudio &operator=(SDLAudio &&) = delete;
-
-    ~SDLAudio();
+    SDLAudio& operator= (const SDLAudio &) = delete;
+    SDLAudio& operator= (SDLAudio &&) = delete;
 
     //
     // Lifecycle
@@ -48,6 +42,9 @@ public:
 
     int init(VAmiga &emulator, int requestedRate = 44100);
     void shutdown();
+
+    // Clear buffered audio (call on focus change to avoid glitches)
+    void flush();
 
 private:
 
