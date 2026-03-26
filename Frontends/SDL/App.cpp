@@ -261,13 +261,13 @@ App::processEvents()
                     if (mouseGrabbed) setMouseGrab(false);
                     break;
                 }
-                // Keyset → joystick (only when grabbed)
-                if (mouseGrabbed && handleKeysetEvent(event.key.scancode, true)) {
-                    if (disconnectKeys) break;
-                }
-                // Forward to Amiga keyboard
-                if (mouseGrabbed && !io.WantCaptureKeyboard) {
-                    handleKeyEvent(event.key, true);
+                if (mouseGrabbed) {
+                    // Keyset → joystick
+                    bool consumed = handleKeysetEvent(event.key.scancode, true);
+                    // Forward to Amiga keyboard (skip if keyset consumed + disconnect)
+                    if (!(consumed && disconnectKeys)) {
+                        handleKeyEvent(event.key, true);
+                    }
                 }
                 break;
 
@@ -275,13 +275,13 @@ App::processEvents()
                 if (mouseGrabbed && handleKeysetEvent(event.key.scancode, false)) {
                     if (disconnectKeys) break;
                 }
-                if (mouseGrabbed && !io.WantCaptureKeyboard && !isGrabHotkey(event.key)) {
+                if (mouseGrabbed && !isGrabHotkey(event.key)) {
                     handleKeyEvent(event.key, false);
                 }
                 break;
 
             case SDL_EVENT_MOUSE_MOTION:
-                if (!io.WantCaptureMouse) {
+                if (mouseGrabbed || !io.WantCaptureMouse) {
                     handleMouseMotion(event.motion);
                 }
                 break;
@@ -291,19 +291,17 @@ App::processEvents()
                 if (!mouseGrabbed && event.button.button == SDL_BUTTON_LEFT) {
                     if (emuWindowHovered) {
                         setMouseGrab(true);
-                        // Forward the grab-click to the Amiga so the user
-                        // doesn't have to click twice (once to grab, once to act)
                         handleMouseButton(event.button, true);
                         break;
                     }
                 }
-                if (!io.WantCaptureMouse) {
+                if (mouseGrabbed || !io.WantCaptureMouse) {
                     handleMouseButton(event.button, true);
                 }
                 break;
 
             case SDL_EVENT_MOUSE_BUTTON_UP:
-                if (!io.WantCaptureMouse) {
+                if (mouseGrabbed || !io.WantCaptureMouse) {
                     handleMouseButton(event.button, false);
                 }
                 break;
