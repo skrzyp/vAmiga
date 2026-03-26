@@ -50,13 +50,13 @@ public:
 
     // Convenience wrappers
     static void hexDump(std::ostream &os, DataProvider reader) {
-        dump(os, { .base = 16 }, { .columns = 16, .offset = true, .ascii = false }, reader);
+        dump(os, { .base = 16 }, { .size = 'b', .columns = 16, .groups = 0, .nr = false, .offset = true, .ascii = false }, reader);
     }
     static void memDump(std::ostream &os, DataProvider reader) {
-        dump(os, { .base = 16 }, { .columns = 16, .offset = true, .ascii = true }, reader);
+        dump(os, { .base = 16 }, { .size = 'b', .columns = 16, .groups = 0, .nr = false, .offset = true, .ascii = true }, reader);
     }
     static void ascDump(std::ostream &os, DataProvider reader) {
-        dump(os, { .base = 0 }, { .columns = 64, .offset = true, .ascii = true }, reader);
+        dump(os, { .base = 0 }, { .size = 'b', .columns = 64, .groups = 0, .nr = false, .offset = true, .ascii = true }, reader);
     }
     static void txtDump(std::ostream &os, DataProvider reader) {
         dump(os, { .base = 0 }, "%a", reader);
