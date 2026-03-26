@@ -29,25 +29,13 @@ App::init(const AppOptions &opts)
     SDL_SetHint(SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE, "1");
 
     // Initialize SDL
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return false;
     }
 
-    // Configure emulator
-    try {
-        emu.set(Opt::MEM_CHIP_RAM, opts.chipRam);
-        emu.set(Opt::MEM_SLOW_RAM, opts.slowRam);
-        emu.set(Opt::MEM_FAST_RAM, opts.fastRam);
-    } catch (std::exception &e) {
-        fprintf(stderr, "Invalid memory configuration: %s\n", e.what());
-        return false;
-    }
-    emu.set(Opt::DRIVE_CONNECT, true, 1);
+    // Enable viewport tracking (always needed for SDL frontend)
     emu.set(Opt::DENISE_VIEWPORT_TRACKING, true);
-
-    printf("Memory: Chip %d KB, Slow %d KB, Fast %d KB\n",
-           opts.chipRam, opts.slowRam, opts.fastRam);
 
     // Load ROM
     printf("Loading ROM: %s\n", opts.rom.c_str());
@@ -133,6 +121,22 @@ App::init(const AppOptions &opts)
     ImGui_ImplSDLRenderer3_Init(renderer);
     imguiReady = true;
 
+    // Create configuration panel and apply saved settings
+    configPanel = std::make_unique<ConfigPanel>(emu, window, gamepads,
+                                                portDevice, &disconnectKeys);
+    configPanel->loadSettings();
+    configPanel->applySettings();
+
+    // CLI memory arguments override saved settings only when explicitly given
+    try {
+        if (opts.chipRamSet) emu.set(Opt::MEM_CHIP_RAM, opts.chipRam);
+        if (opts.slowRamSet) emu.set(Opt::MEM_SLOW_RAM, opts.slowRam);
+        if (opts.fastRamSet) emu.set(Opt::MEM_FAST_RAM, opts.fastRam);
+    } catch (std::exception &e) {
+        fprintf(stderr, "Invalid memory configuration: %s\n", e.what());
+        return false;
+    }
+
     // Initialize audio
     const int sampleRate = audio.init(emu);
     if (!sampleRate) {
@@ -173,6 +177,11 @@ App::run()
 void
 App::shutdown()
 {
+    // Auto-save settings before shutting down
+    if (configPanel) {
+        configPanel->saveSettings();
+    }
+
     emu.pause();
     emu.powerOff();
 
@@ -183,6 +192,10 @@ App::shutdown()
         ImGui_ImplSDL3_Shutdown();
         ImGui::DestroyContext();
         imguiReady = false;
+    }
+
+    for (auto &g : gamepads) {
+        if (g.pad) { SDL_CloseGamepad(g.pad); g = {}; }
     }
 
     if (emuTexture) { SDL_DestroyTexture(emuTexture); emuTexture = nullptr; }
@@ -226,13 +239,20 @@ App::processEvents()
                     if (mouseGrabbed) setMouseGrab(false);
                     break;
                 }
-                // Forward to emulator only when grabbed and ImGui doesn't want it
+                // Keyset → joystick (only when grabbed)
+                if (mouseGrabbed && handleKeysetEvent(event.key.scancode, true)) {
+                    if (disconnectKeys) break;
+                }
+                // Forward to Amiga keyboard
                 if (mouseGrabbed && !io.WantCaptureKeyboard) {
                     handleKeyEvent(event.key, true);
                 }
                 break;
 
             case SDL_EVENT_KEY_UP:
+                if (mouseGrabbed && handleKeysetEvent(event.key.scancode, false)) {
+                    if (disconnectKeys) break;
+                }
                 if (mouseGrabbed && !io.WantCaptureKeyboard && !isGrabHotkey(event.key)) {
                     handleKeyEvent(event.key, false);
                 }
@@ -245,12 +265,13 @@ App::processEvents()
                 break;
 
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                // Click on the Amiga display to grab mouse
+                // Click on the Amiga display image to grab mouse
                 if (!mouseGrabbed && event.button.button == SDL_BUTTON_LEFT) {
-                    // Grab if clicking on the emu window area or the background
-                    // (not on ImGui floating windows like RetroShell or menu bar)
-                    if (emuWindowHovered || !io.WantCaptureMouse) {
+                    if (emuWindowHovered) {
                         setMouseGrab(true);
+                        // Forward the grab-click to the Amiga so the user
+                        // doesn't have to click twice (once to grab, once to act)
+                        handleMouseButton(event.button, true);
                         break;
                     }
                 }
@@ -263,6 +284,23 @@ App::processEvents()
                 if (!io.WantCaptureMouse) {
                     handleMouseButton(event.button, false);
                 }
+                break;
+
+            case SDL_EVENT_GAMEPAD_ADDED:
+                handleGamepadAdded(event.gdevice.which);
+                break;
+
+            case SDL_EVENT_GAMEPAD_REMOVED:
+                handleGamepadRemoved(event.gdevice.which);
+                break;
+
+            case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            case SDL_EVENT_GAMEPAD_BUTTON_UP:
+                handleGamepadButton(event.gbutton);
+                break;
+
+            case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+                handleGamepadAxis(event.gaxis);
                 break;
 
             case SDL_EVENT_WINDOW_FOCUS_LOST:
@@ -339,7 +377,40 @@ App::buildUI()
     // Main menu bar
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("Configuration...")) {
+                if (configPanel) configPanel->open();
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem("Quit", "Ctrl+Q")) quit.store(true);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Machine")) {
+            bool isPoweredOn = emu.isPoweredOn();
+            bool isRunning = emu.isRunning();
+
+            // Power toggle
+            bool powered = isPoweredOn;
+            if (ImGui::MenuItem("Power", nullptr, &powered)) {
+                if (powered) { emu.powerOn(); emu.run(); }
+                else { emu.powerOff(); }
+            }
+
+            // Pause toggle (only meaningful when powered on)
+            bool paused = isPoweredOn && !isRunning;
+            if (ImGui::MenuItem("Pause", nullptr, &paused, isPoweredOn)) {
+                if (paused) emu.pause();
+                else emu.run();
+            }
+
+            ImGui::Separator();
+
+            if (ImGui::MenuItem("Soft Reset", nullptr, false, isPoweredOn)) {
+                emu.softReset();
+            }
+            if (ImGui::MenuItem("Hard Reset", nullptr, false, isPoweredOn)) {
+                emu.hardReset();
+            }
+
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("View")) {
@@ -353,6 +424,11 @@ App::buildUI()
     // Decorated Amiga window (with titlebar, resize, border)
     if (showEmuDecorations) {
         renderEmuWindowDecorated();
+    }
+
+    // Configuration panel
+    if (configPanel) {
+        configPanel->render();
     }
 
     // RetroShell console
@@ -397,7 +473,8 @@ App::renderEmuWindowDecorated()
 
     ImGui::Image(reinterpret_cast<ImTextureID>(emuTexture), ImVec2(w, h), uv0, uv1);
 
-    emuWindowHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
+    // Only grab mouse when clicking directly on the Amiga image, not the titlebar
+    emuWindowHovered = ImGui::IsItemHovered();
 
     ImGui::End();
     ImGui::PopStyleVar();
@@ -441,9 +518,15 @@ App::renderEmuWindow()
 
     SDL_RenderTexture(renderer, emuTexture, &src, &dst);
 
-    // When not using decorations, the emu area is "hovered" whenever
-    // ImGui isn't consuming the mouse (no floating windows under cursor)
-    emuWindowHovered = !ImGui::GetIO().WantCaptureMouse;
+    // Check if mouse is over the Amiga display area (not just "not on ImGui")
+    if (!io.WantCaptureMouse) {
+        const float mx = io.MousePos.x;
+        const float my = io.MousePos.y;
+        emuWindowHovered = (mx >= dst.x && mx < dst.x + dst.w &&
+                            my >= dst.y && my < dst.y + dst.h);
+    } else {
+        emuWindowHovered = false;
+    }
 }
 
 // RetroShell console window
@@ -591,12 +674,11 @@ App::handleMessage(Message msg)
 
             if (hstrt == 0 && vstrt == 0 && hstop == 0 && vstop == 0) break;
 
-            constexpr int hblankOffset = 0x12 * 4;
-            int px1 = 2 * hstrt - hblankOffset;
-            int px2 = 2 * hstop - hblankOffset;
+            constexpr int lvX = 4 * HBLANK_CNT;
+            int px1 = 2 * hstrt - lvX;
+            int px2 = 2 * hstop - lvX;
 
             const bool curNtsc = ntscValue.load();
-            constexpr int lvX = 4 * HBLANK_CNT;
             const int vblank = curNtsc ? static_cast<int>(NTSC::VBLANK_CNT) : static_cast<int>(PAL::VBLANK_CNT);
             const int vmax   = curNtsc ? static_cast<int>(NTSC::VPOS_CNT)   : static_cast<int>(PAL::VPOS_CNT);
             const int hmax   = curNtsc ? static_cast<int>(4 * NTSC::HPOS_CNT) : static_cast<int>(4 * PAL::HPOS_CNT);
@@ -691,8 +773,10 @@ void
 App::handleMouseMotion(const SDL_MouseMotionEvent &e)
 {
     if (!mouseGrabbed) return;
-    emu.put(Cmd::MOUSE_MOVE_REL, CoordCmd(0, static_cast<double>(e.xrel),
-                                              static_cast<double>(e.yrel)));
+    int port = portForDevice(PortDevice::Mouse);
+    if (port < 0) return;
+    emu.put(Cmd::MOUSE_MOVE_REL, CoordCmd(port, static_cast<double>(e.xrel),
+                                                 static_cast<double>(e.yrel)));
 }
 
 void
@@ -714,7 +798,177 @@ App::handleMouseButton(const SDL_MouseButtonEvent &e, bool pressed)
         default:
             return;
     }
-    emu.put(Cmd::MOUSE_BUTTON, GamePadCmd(0, action));
+    int port = portForDevice(PortDevice::Mouse);
+    if (port < 0) return;
+    emu.put(Cmd::MOUSE_BUTTON, GamePadCmd(port, action));
+}
+
+// Gamepad
+
+int
+App::portForDevice(PortDevice dev) const
+{
+    if (portDevice[0] == dev) return 0;
+    if (portDevice[1] == dev) return 1;
+    return -1;
+}
+
+bool
+App::handleKeysetEvent(SDL_Scancode sc, bool pressed)
+{
+    auto check = [&](const KeysetDef &ks, int port) -> bool {
+        GamePadAction action;
+        if      (sc == ks.up)    action = pressed ? GamePadAction::PULL_UP    : GamePadAction::RELEASE_Y;
+        else if (sc == ks.down)  action = pressed ? GamePadAction::PULL_DOWN  : GamePadAction::RELEASE_Y;
+        else if (sc == ks.left)  action = pressed ? GamePadAction::PULL_LEFT  : GamePadAction::RELEASE_X;
+        else if (sc == ks.right) action = pressed ? GamePadAction::PULL_RIGHT : GamePadAction::RELEASE_X;
+        else if (sc == ks.fire)  action = pressed ? GamePadAction::PRESS_FIRE : GamePadAction::RELEASE_FIRE;
+        else return false;
+        emu.put(Cmd::JOY_EVENT, GamePadCmd(port, action));
+        return true;
+    };
+
+    int p1 = portForDevice(PortDevice::Keyset1);
+    if (p1 >= 0 && check(kKeyset1, p1)) return true;
+
+    int p2 = portForDevice(PortDevice::Keyset2);
+    if (p2 >= 0 && check(kKeyset2, p2)) return true;
+
+    return false;
+}
+
+void
+App::handleGamepadAdded(SDL_JoystickID id)
+{
+    // Find free slot
+    int slot = -1;
+    for (int i = 0; i < kMaxGamepads; i++) {
+        if (!gamepads[i].pad) { slot = i; break; }
+    }
+    if (slot < 0) return;
+
+    SDL_Gamepad *pad = SDL_OpenGamepad(id);
+    if (!pad) return;
+
+    gamepads[slot] = { pad, id };
+
+    // Auto-assign to first port that has None (prefer Port 2)
+    auto dev = static_cast<PortDevice>(static_cast<int>(PortDevice::Gamepad0) + slot);
+    if (portDevice[1] == PortDevice::None) portDevice[1] = dev;
+    else if (portDevice[0] == PortDevice::None) portDevice[0] = dev;
+
+    const char *name = SDL_GetGamepadName(pad);
+    printf("Gamepad connected: %s (slot %d)\n", name ? name : "Unknown", slot);
+}
+
+void
+App::handleGamepadRemoved(SDL_JoystickID id)
+{
+    for (int i = 0; i < kMaxGamepads; i++) {
+        if (gamepads[i].pad && gamepads[i].id == id) {
+            auto dev = static_cast<PortDevice>(static_cast<int>(PortDevice::Gamepad0) + i);
+            int port = portForDevice(dev);
+            if (port >= 0) {
+                emu.put(Cmd::JOY_EVENT, GamePadCmd(port, GamePadAction::RELEASE_XY));
+                emu.put(Cmd::JOY_EVENT, GamePadCmd(port, GamePadAction::RELEASE_FIRE));
+                portDevice[port] = PortDevice::None;
+            }
+            printf("Gamepad disconnected: slot %d\n", i);
+            SDL_CloseGamepad(gamepads[i].pad);
+            gamepads[i] = {};
+            break;
+        }
+    }
+}
+
+void
+App::handleGamepadButton(const SDL_GamepadButtonEvent &e)
+{
+    int slot = -1;
+    for (int i = 0; i < kMaxGamepads; i++) {
+        if (gamepads[i].pad && gamepads[i].id == e.which) { slot = i; break; }
+    }
+    if (slot < 0) return;
+    auto dev = static_cast<PortDevice>(static_cast<int>(PortDevice::Gamepad0) + slot);
+    int port = portForDevice(dev);
+    if (port < 0) return;
+
+    GamePadAction action;
+    switch (static_cast<SDL_GamepadButton>(e.button)) {
+        case SDL_GAMEPAD_BUTTON_SOUTH:
+        case SDL_GAMEPAD_BUTTON_WEST:
+            action = e.down ? GamePadAction::PRESS_FIRE : GamePadAction::RELEASE_FIRE;
+            break;
+        case SDL_GAMEPAD_BUTTON_EAST:
+        case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER:
+            action = e.down ? GamePadAction::PRESS_FIRE2 : GamePadAction::RELEASE_FIRE2;
+            break;
+        case SDL_GAMEPAD_BUTTON_NORTH:
+        case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER:
+            action = e.down ? GamePadAction::PRESS_FIRE3 : GamePadAction::RELEASE_FIRE3;
+            break;
+        case SDL_GAMEPAD_BUTTON_DPAD_UP:
+            action = e.down ? GamePadAction::PULL_UP : GamePadAction::RELEASE_Y;
+            break;
+        case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
+            action = e.down ? GamePadAction::PULL_DOWN : GamePadAction::RELEASE_Y;
+            break;
+        case SDL_GAMEPAD_BUTTON_DPAD_LEFT:
+            action = e.down ? GamePadAction::PULL_LEFT : GamePadAction::RELEASE_X;
+            break;
+        case SDL_GAMEPAD_BUTTON_DPAD_RIGHT:
+            action = e.down ? GamePadAction::PULL_RIGHT : GamePadAction::RELEASE_X;
+            break;
+        default:
+            return;
+    }
+    emu.put(Cmd::JOY_EVENT, GamePadCmd(port, action));
+}
+
+void
+App::handleGamepadAxis(const SDL_GamepadAxisEvent &e)
+{
+    int slot = -1;
+    for (int i = 0; i < kMaxGamepads; i++) {
+        if (gamepads[i].pad && gamepads[i].id == e.which) { slot = i; break; }
+    }
+    if (slot < 0) return;
+    auto dev = static_cast<PortDevice>(static_cast<int>(PortDevice::Gamepad0) + slot);
+    int port = portForDevice(dev);
+    if (port < 0) return;
+    auto &g = gamepads[slot];
+
+    static constexpr Sint16 kDeadzone = 8000;
+
+    if (e.axis == SDL_GAMEPAD_AXIS_LEFTX) {
+        bool left = e.value < -kDeadzone;
+        bool right = e.value > kDeadzone;
+
+        if (left != g.stickLeft) {
+            g.stickLeft = left;
+            emu.put(Cmd::JOY_EVENT, GamePadCmd(port,
+                left ? GamePadAction::PULL_LEFT : GamePadAction::RELEASE_X));
+        }
+        if (right != g.stickRight) {
+            g.stickRight = right;
+            emu.put(Cmd::JOY_EVENT, GamePadCmd(port,
+                right ? GamePadAction::PULL_RIGHT : GamePadAction::RELEASE_X));
+        }
+    } else if (e.axis == SDL_GAMEPAD_AXIS_LEFTY) {
+        bool up = e.value < -kDeadzone;
+        bool down = e.value > kDeadzone;
+
+        if (up != g.stickUp) {
+            g.stickUp = up;
+            emu.put(Cmd::JOY_EVENT, GamePadCmd(port,
+                up ? GamePadAction::PULL_UP : GamePadAction::RELEASE_Y));
+        }
+        if (down != g.stickDown) {
+            g.stickDown = down;
+            emu.put(Cmd::JOY_EVENT, GamePadCmd(port,
+                down ? GamePadAction::PULL_DOWN : GamePadAction::RELEASE_Y));
+        }
+    }
 }
 
 // Viewport

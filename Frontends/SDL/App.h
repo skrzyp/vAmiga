@@ -12,11 +12,13 @@
 #include "VAmiga.h"
 #include "Infrastructure/Constants.h"
 #include "SDLAudio.h"
+#include "ConfigPanel.h"
 #include "KeyMap.h"
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -31,6 +33,11 @@ struct AppOptions {
     int chipRam = 512;
     int slowRam = 512;
     int fastRam = 0;
+
+    // Track which options were explicitly provided on the command line
+    bool chipRamSet = false;
+    bool slowRamSet = false;
+    bool fastRamSet = false;
 };
 
 class App {
@@ -41,6 +48,7 @@ class App {
 
     VAmiga emu;
     SDLAudio audio;
+    std::unique_ptr<ConfigPanel> configPanel;
 
     //
     // SDL resources
@@ -107,6 +115,25 @@ class App {
 
     bool mouseGrabbed = false;
 
+    //
+    // Gamepads and port assignment
+    //
+
+    GamepadSlot gamepads[kMaxGamepads] = {};
+    PortDevice portDevice[2] = { PortDevice::Mouse, PortDevice::None };
+    bool disconnectKeys = true;
+
+    static constexpr KeysetDef kKeyset1 = {
+        SDL_SCANCODE_UP, SDL_SCANCODE_DOWN,
+        SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT,
+        SDL_SCANCODE_SPACE
+    };
+    static constexpr KeysetDef kKeyset2 = {
+        SDL_SCANCODE_E, SDL_SCANCODE_X,
+        SDL_SCANCODE_S, SDL_SCANCODE_D,
+        SDL_SCANCODE_C
+    };
+
 public:
 
     // Quit flag (public so the signal handler can set it)
@@ -164,6 +191,18 @@ private:
     void handleMouseButton(const SDL_MouseButtonEvent &e, bool pressed);
 
     static bool isGrabHotkey(const SDL_KeyboardEvent &e);
+
+    //
+    // Gamepad
+    //
+
+    void handleGamepadAdded(SDL_JoystickID id);
+    void handleGamepadRemoved(SDL_JoystickID id);
+    void handleGamepadButton(const SDL_GamepadButtonEvent &e);
+    void handleGamepadAxis(const SDL_GamepadAxisEvent &e);
+
+    int portForDevice(PortDevice dev) const;
+    bool handleKeysetEvent(SDL_Scancode sc, bool pressed);
 
     //
     // Viewport

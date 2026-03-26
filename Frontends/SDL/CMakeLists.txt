@@ -48,6 +48,7 @@ endif()
 add_executable(VASDL
     main.cpp
     App.cpp
+    ConfigPanel.cpp
     SDLAudio.cpp
 )
 

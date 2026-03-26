@@ -11,18 +11,19 @@
 #include "App.h"
 
 #include <CLI/CLI.hpp>
+#include <atomic>
 #include <cstdio>
 #include <csignal>
 
 using namespace vamiga;
 
-// Global quit flag for signal handler
-static App *gApp = nullptr;
+// Global quit flag for signal handler (atomic for signal safety)
+static std::atomic<App *> gApp {nullptr};
 
 static void
 signalHandler(int /*sig*/)
 {
-    if (gApp) gApp->quit.store(true);
+    if (auto *app = gApp.load()) app->quit.store(true);
 }
 
 // Main
@@ -70,13 +71,16 @@ int main(int argc, char *argv[])
 
     CLI11_PARSE(cli, argc, argv);
 
-    // --shell was used if the option was parsed (even without a value)
+    // Track which options were explicitly provided
     opts.shell = cli["--shell"]->count() > 0;
+    opts.chipRamSet = cli["--chip"]->count() > 0;
+    opts.slowRamSet = cli["--slow"]->count() > 0;
+    opts.fastRamSet = cli["--fast"]->count() > 0;
 
     printf("vAmiga SDL Frontend\n\n");
 
     App app;
-    gApp = &app;
+    gApp.store(&app);
 
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
@@ -87,7 +91,7 @@ int main(int argc, char *argv[])
     app.shutdown();
 
     // Clear signal handler target before App is destroyed
-    gApp = nullptr;
+    gApp.store(nullptr);
 
     return 0;
 }
