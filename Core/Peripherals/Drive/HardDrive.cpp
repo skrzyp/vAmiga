@@ -772,47 +772,32 @@ HardDrive::importFolder(const fs::path &path)
     }
     
     if (fs::is_directory(path)) {
-        
+
         loginfo(HDR_DEBUG, "Importing directory...\n");
 
-        // Retrieve some information about the first partition
-        auto traits = getPartitionTraits(0);
+        // Ensure the drive is initialized with geometry
+        if (!data.ptr) {
 
-        // Create a file system on top of the drive
+            // Calculate needed size from directory contents
+            uintmax_t bytes = 0;
+            for (auto &entry : fs::recursive_directory_iterator(path)) {
+                if (entry.is_regular_file()) bytes += entry.file_size();
+            }
+            bytes = std::max(bytes * 2, static_cast<uintmax_t>(2 * 1024 * 1024));
+            init(GeometryDescriptor(isize(bytes)));
+        }
+
+        // Create a volume on top of this drive and format it
         auto vol = Volume(*this);
         auto fs = FileSystem(vol);
+        fs.format(amiga::FSFormat::FFS);
+        fs.setName(FSName("DH0"));
 
-        // Import all files
+        // Import all files from the host directory
         fs.importer.import(fs.root(), path, true, true);
 
-        // Name the file system
-        fs.setName(FSName(traits.name));
-
-        // Write back
+        // Write changes back to the drive
         fs.flush();
-
-        /*
-        // Retrieve some information about the first partition
-        auto traits = getPartitionTraits(0);
-
-        // Create a device descriptor matching this drive
-        FSDescriptor layout(geometry, traits.fsType);
-
-        // Create an empty device
-        auto dev = Device(geometry);
-
-        // Create a new file system
-        auto fs = FileSystem(dev, layout);
-        
-        // Import all files
-        fs.importer.import(fs.root(), path, true, true);
-
-        // Name the file system
-        fs.setName(traits.name);
-        
-        // Copy the file system back to the disk
-        init(fs);
-        */
     }
 }
 
