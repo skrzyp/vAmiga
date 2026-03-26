@@ -12,7 +12,7 @@
 #include "Misc/RemoteServers/RemoteManagerTypes.h"
 
 #include <imgui_impl_sdl3.h>
-#include <imgui_impl_sdlrenderer3.h>
+#include <imgui_impl_sdlgpu3.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -67,7 +67,7 @@ App::init(const AppOptions &opts)
                opts.shellPort, opts.shellPort);
     }
 
-    // Create SDL window and renderer
+    // Create SDL window
     window = SDL_CreateWindow("vAmiga", 1024, 768,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!window) {
@@ -76,30 +76,15 @@ App::init(const AppOptions &opts)
         return false;
     }
 
-    renderer = SDL_CreateRenderer(window, nullptr);
-    if (!renderer) {
-        fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
-        shutdown();
-        return false;
-    }
-    SDL_SetRenderVSync(renderer, 1);
-
     // Bring window to front (macOS CLI apps don't auto-focus)
     SDL_RaiseWindow(window);
 
-    // Create emulator texture
-    // vAmiga core outputs ABGR in memory on LE (HI_HI_LO_LO(0xFF,b,g,r)).
-    // SDL_PIXELFORMAT_RGBA32 is host-endian RGBA = ABGR8888 on LE — matches.
-    emuTexture = SDL_CreateTexture(renderer,
-        SDL_PIXELFORMAT_RGBA32,
-        SDL_TEXTUREACCESS_STREAMING,
-        HPIXELS, VPIXELS);
-    if (!emuTexture) {
-        fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
+    // Initialize GPU renderer
+    gpu = std::make_unique<GPURenderer>();
+    if (!gpu->init(window)) {
         shutdown();
         return false;
     }
-    SDL_SetTextureScaleMode(emuTexture, SDL_SCALEMODE_NEAREST);
 
     // Set initial viewport
     setDefaultViewport(false);
@@ -110,15 +95,17 @@ App::init(const AppOptions &opts)
 
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    // Disable imgui.ini (always start fresh)
     io.IniFilename = nullptr;
 
-    // Dark theme
     ImGui::StyleColorsDark();
 
-    // Init ImGui backends
-    ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
-    ImGui_ImplSDLRenderer3_Init(renderer);
+    // Init ImGui backends (SDL3 + SDL_GPU)
+    ImGui_ImplSDL3_InitForSDLGPU(window);
+    ImGui_ImplSDLGPU3_InitInfo gpuInitInfo = {};
+    gpuInitInfo.Device = gpu->getDevice();
+    gpuInitInfo.ColorTargetFormat = gpu->getSwapchainFormat();
+    gpuInitInfo.MSAASamples = SDL_GPU_SAMPLECOUNT_1;
+    ImGui_ImplSDLGPU3_Init(&gpuInitInfo);
     imguiReady = true;
 
     // Create configuration panel and apply saved settings
@@ -160,7 +147,7 @@ App::run()
         while (!quit.load()) {
             // Start ImGui frame BEFORE processing events so that
             // io.WantCaptureMouse/Keyboard reflect the current frame
-            ImGui_ImplSDLRenderer3_NewFrame();
+            ImGui_ImplSDLGPU3_NewFrame();
             ImGui_ImplSDL3_NewFrame();
             ImGui::NewFrame();
 
@@ -190,7 +177,7 @@ App::shutdown()
     audio.shutdown();
 
     if (imguiReady) {
-        ImGui_ImplSDLRenderer3_Shutdown();
+        ImGui_ImplSDLGPU3_Shutdown();
         ImGui_ImplSDL3_Shutdown();
         ImGui::DestroyContext();
         imguiReady = false;
@@ -200,9 +187,8 @@ App::shutdown()
         if (g.pad) { SDL_CloseGamepad(g.pad); g = {}; }
     }
 
-    if (emuTexture) { SDL_DestroyTexture(emuTexture); emuTexture = nullptr; }
-    if (renderer)   { SDL_DestroyRenderer(renderer);   renderer   = nullptr; }
-    if (window)     { SDL_DestroyWindow(window);       window     = nullptr; }
+    if (gpu)    { gpu->shutdown(); gpu.reset(); }
+    if (window) { SDL_DestroyWindow(window); window = nullptr; }
 
     SDL_Quit();
 }
@@ -340,11 +326,14 @@ App::update()
     // Sample dashboard metrics
     if (dashboard) dashboard->update();
 
-    // Copy emulator texture
+    // Recompute viewport every frame (picks up geometry option changes)
+    recomputeViewport();
+
+    // Upload emulator framebuffer to GPU
     emu.videoPort.lockTexture();
     const u32 *pixels = emu.videoPort.getTexture();
-    if (pixels && emuTexture) {
-        SDL_UpdateTexture(emuTexture, nullptr, pixels, HPIXELS * sizeof(u32));
+    if (pixels && gpu) {
+        gpu->uploadTexture(pixels);
     }
     emu.videoPort.unlockTexture();
 }
@@ -356,22 +345,11 @@ App::render()
     // (NewFrame was already called at the start of the main loop)
     buildUI();
 
-    // Finalize ImGui
+    // Finalize ImGui and render via GPU
     ImGui::Render();
-
-    // Set render scale for HiDPI (ImGui works in logical coordinates)
-    const ImGuiIO &io = ImGui::GetIO();
-    SDL_SetRenderScale(renderer, io.DisplayFramebufferScale.x,
-                                 io.DisplayFramebufferScale.y);
-
-    // Render: black background → Amiga display → ImGui overlay
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-    SDL_RenderClear(renderer);
-    if (!showEmuDecorations) {
-        renderEmuWindow();  // Amiga texture as background (no decorations)
+    if (gpu) {
+        gpu->renderFrame(srcRect, ImGui::GetDrawData(), !showEmuDecorations);
     }
-    ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
-    SDL_RenderPresent(renderer);
 }
 
 // ImGui UI
@@ -484,7 +462,7 @@ App::renderEmuWindowDecorated()
     const ImVec2 uv1((srcRect.x + srcRect.w) / static_cast<float>(HPIXELS),
                      (srcRect.y + srcRect.h) / static_cast<float>(VPIXELS));
 
-    ImGui::Image(reinterpret_cast<ImTextureID>(emuTexture), ImVec2(w, h), uv0, uv1);
+    ImGui::Image(reinterpret_cast<ImTextureID>(gpu ? gpu->getEmuTexture() : nullptr), ImVec2(w, h), uv0, uv1);
 
     // Only grab mouse when clicking directly on the Amiga image, not the titlebar
     emuWindowHovered = ImGui::IsItemHovered();
@@ -496,50 +474,32 @@ App::renderEmuWindowDecorated()
 void
 App::renderEmuWindow()
 {
-    // Render the Amiga display directly into the SDL renderer background.
-    // Coordinates must be in the scaled space (SDL_SetRenderScale is active),
-    // so we use the logical window size.
+    // In non-decorated mode, the GPU renderer draws the Amiga display directly.
+    // Here we just track mouse hover state for the grab logic.
 
     const ImGuiIO &io = ImGui::GetIO();
+    if (io.WantCaptureMouse) {
+        emuWindowHovered = false;
+        return;
+    }
+
+    // The GPU renderer draws the Amiga display centered in the window
+    // with 4:3 aspect ratio. Approximate the display rect for hover detection.
     const float winW = io.DisplaySize.x;
     const float winH = io.DisplaySize.y;
-    if (winW <= 0 || winH <= 0) return;
-
-    // Account for menu bar height (in logical coordinates)
     const float topOffset = ImGui::GetFrameHeight();
-
     const float areaW = winW;
     const float areaH = winH - topOffset;
-    if (areaH <= 0) return;
+    if (areaW <= 0 || areaH <= 0) { emuWindowHovered = false; return; }
 
-    // Fit 4:3 into the available area below the menu bar
     constexpr float targetAspect = 4.0f / 3.0f;
-    float w = areaW;
-    float h = w / targetAspect;
-    if (h > areaH) {
-        h = areaH;
-        w = h * targetAspect;
-    }
+    float w = areaW, h = w / targetAspect;
+    if (h > areaH) { h = areaH; w = h * targetAspect; }
+    float dx = (areaW - w) * 0.5f;
+    float dy = topOffset;
 
-    // Center horizontally, pin to top of area (below menu bar)
-    const float dx = (areaW - w) * 0.5f;
-    const float dy = topOffset;
-
-    // UV coordinates for viewport cropping
-    const SDL_FRect src = srcRect;
-    const SDL_FRect dst = { dx, dy, w, h };
-
-    SDL_RenderTexture(renderer, emuTexture, &src, &dst);
-
-    // Check if mouse is over the Amiga display area (not just "not on ImGui")
-    if (!io.WantCaptureMouse) {
-        const float mx = io.MousePos.x;
-        const float my = io.MousePos.y;
-        emuWindowHovered = (mx >= dst.x && mx < dst.x + dst.w &&
-                            my >= dst.y && my < dst.y + dst.h);
-    } else {
-        emuWindowHovered = false;
-    }
+    const float mx = io.MousePos.x, my = io.MousePos.y;
+    emuWindowHovered = (mx >= dx && mx < dx + w && my >= dy && my < dy + h);
 }
 
 // RetroShell console window
@@ -994,13 +954,30 @@ App::recomputeViewport()
     const int lvW = isNtsc ? LV_W_NTSC : LV_W_PAL;
     const int lvH = isNtsc ? LV_H_NTSC : LV_H_PAL;
 
+    // Read zoom from core geometry settings (matching macOS TextureRect.swift)
+    float hZoom, vZoom;
+    int zoomPreset = static_cast<int>(emu.get(Opt::MON_ZOOM));
+    switch (zoomPreset) {
+        case 1:  hZoom = 1.0f;   vZoom = 0.27f;  break;  // Narrow
+        case 2:  hZoom = 0.747f; vZoom = 0.032f;  break;  // Wide
+        case 3:  hZoom = 0.0f;   vZoom = 0.0f;    break;  // Extreme
+        default: // Custom
+            hZoom = static_cast<float>(emu.get(Opt::MON_HZOOM)) / 1000.0f;
+            vZoom = static_cast<float>(emu.get(Opt::MON_VZOOM)) / 1000.0f;
+            break;
+    }
+
+    const float hScale = 1.0f - 0.2f * hZoom;
+    const float vScale = 1.0f - 0.2f * vZoom;
     const float visW = hScale * static_cast<float>(lvW);
     const float visH = vScale * static_cast<float>(lvH);
 
     float originX = 0;
     float originY = 0;
 
-    if (contentX2 > contentX1 && contentY2 > contentY1) {
+    int centerMode = static_cast<int>(emu.get(Opt::MON_CENTER));
+    if (centerMode == 1 && contentX2 > contentX1 && contentY2 > contentY1) {
+        // Auto-center on content area
         const float contentW = contentX2 - contentX1;
         const float contentH = contentY2 - contentY1;
 
@@ -1011,7 +988,14 @@ App::recomputeViewport()
         originX = std::min(originX, static_cast<float>(lvX + lvW) - visW);
         originY = std::max(originY, static_cast<float>(lvY));
         originY = std::min(originY, static_cast<float>(lvY + lvH) - visH);
+    } else if (centerMode == 0) {
+        // Manual center
+        float hCenter = static_cast<float>(emu.get(Opt::MON_HCENTER)) / 1000.0f;
+        float vCenter = static_cast<float>(emu.get(Opt::MON_VCENTER)) / 1000.0f;
+        originX = static_cast<float>(lvX) + hCenter * (static_cast<float>(lvW) - visW);
+        originY = static_cast<float>(lvY) + vCenter * (static_cast<float>(lvH) - visH);
     } else {
+        // Fallback: center in visible area
         originX = static_cast<float>(lvX) + (static_cast<float>(lvW) - visW) * 0.5f;
         originY = static_cast<float>(lvY) + (static_cast<float>(lvH) - visH) * 0.5f;
     }

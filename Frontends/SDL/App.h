@@ -14,6 +14,7 @@
 #include "SDLAudio.h"
 #include "ConfigPanel.h"
 #include "Dashboard.h"
+#include "GPURenderer.h"
 #include "KeyMap.h"
 
 #include <SDL3/SDL.h>
@@ -57,10 +58,7 @@ class App {
     //
 
     SDL_Window *window = nullptr;
-    SDL_Renderer *renderer = nullptr;
-
-    // Emulator framebuffer texture (912x313 RGBA32)
-    SDL_Texture *emuTexture = nullptr;
+    std::unique_ptr<GPURenderer> gpu;
 
     //
     // Thread-safe state (emulator thread -> main thread)
@@ -79,10 +77,6 @@ class App {
 
     SDL_FRect srcRect {};
     bool isNtsc = false;
-
-    // "Wide" zoom factors (matching Swift GUI defaults)
-    static constexpr float hScale = 0.8506f;  // 1.0 - 0.2 * 0.747
-    static constexpr float vScale = 0.9936f;  // 1.0 - 0.2 * 0.032
 
     // Largest visible area constants
     static constexpr int LV_X = 4 * HBLANK_CNT;
