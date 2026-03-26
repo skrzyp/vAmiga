@@ -48,6 +48,10 @@ int main(int argc, char *argv[])
         ->type_name("PATH")
         ->check(CLI::ExistingFile.description(""));
 
+    cli.add_option("-d,--hdf", opts.hdf, "Hard drive (HDF file or directory)")
+        ->type_name("PATH")
+        ->check(CLI::ExistingPath.description(""));
+
     // Memory configuration
     cli.add_option("--chip", opts.chipRam, "Chip RAM in KB (256/512/1024/2048)")
         ->type_name("KB")

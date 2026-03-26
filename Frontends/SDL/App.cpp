@@ -59,6 +59,40 @@ App::init(const AppOptions &opts)
         }
     }
 
+    // Attach hard drive (HDF file or host directory → DH0:)
+    if (!opts.hdf.empty()) {
+        printf("Attaching hard drive: %s\n", opts.hdf.c_str());
+        try {
+            emu.set(Opt::HDC_CONNECT, true, 0);
+
+            namespace fs = std::filesystem;
+            if (fs::is_directory(opts.hdf)) {
+                // Directory mount: compute size, create geometry, format, import
+                uintmax_t bytes = 0;
+                for (auto &entry : fs::recursive_directory_iterator(opts.hdf)) {
+                    if (entry.is_regular_file()) bytes += entry.file_size();
+                }
+                // Add overhead for filesystem structures (2x headroom, min 2 MB)
+                bytes = std::max(bytes * 2, static_cast<uintmax_t>(2 * 1024 * 1024));
+
+                // Simple geometry: 16 heads, 63 sectors, 512 bytes/sector
+                isize bytesPerCyl = 16 * 63 * 512;
+                isize cylinders = std::max(static_cast<isize>(16),
+                    static_cast<isize>((bytes + bytesPerCyl - 1) / bytesPerCyl));
+
+                emu.hd0.attach(cylinders, 16, 63);
+                emu.hd0.importFiles(opts.hdf);
+                printf("Mounted directory as DH0: (%lld cylinders, FFS)\n",
+                       static_cast<long long>(cylinders));
+            } else {
+                // HDF file
+                emu.hd0.attach(opts.hdf);
+            }
+        } catch (std::exception &e) {
+            fprintf(stderr, "Failed to attach hard drive: %s\n", e.what());
+        }
+    }
+
     // Remote servers
     if (opts.shell) {
         emu.set(Opt::SRV_PORT, opts.shellPort, static_cast<i64>(ServerType::RSH));

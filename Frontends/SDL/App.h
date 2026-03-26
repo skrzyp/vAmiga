@@ -30,6 +30,7 @@ namespace vamiga {
 struct AppOptions {
     std::string rom;
     std::string adf;
+    std::string hdf;
     bool shell = false;
     int shellPort = 8081;
     int chipRam = 512;
