@@ -49,6 +49,7 @@ add_executable(VASDL
     main.cpp
     App.cpp
     ConfigPanel.cpp
+    Dashboard.cpp
     SDLAudio.cpp
 )
 

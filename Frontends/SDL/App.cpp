@@ -127,6 +127,8 @@ App::init(const AppOptions &opts)
     configPanel->loadSettings();
     configPanel->applySettings();
 
+    dashboard = std::make_unique<Dashboard>(emu);
+
     // CLI memory arguments override saved settings only when explicitly given
     try {
         if (opts.chipRamSet) emu.set(Opt::MEM_CHIP_RAM, opts.chipRam);
@@ -335,6 +337,9 @@ App::update()
         }
     }
 
+    // Sample dashboard metrics
+    if (dashboard) dashboard->update();
+
     // Copy emulator texture
     emu.videoPort.lockTexture();
     const u32 *pixels = emu.videoPort.getTexture();
@@ -416,6 +421,9 @@ App::buildUI()
         if (ImGui::BeginMenu("View")) {
             ImGui::MenuItem("Window Decorations", nullptr, &showEmuDecorations);
             ImGui::MenuItem("RetroShell", nullptr, &showRetroShell);
+            if (ImGui::MenuItem("Dashboard")) {
+                if (dashboard) dashboard->open();
+            }
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
@@ -429,6 +437,11 @@ App::buildUI()
     // Configuration panel
     if (configPanel) {
         configPanel->render();
+    }
+
+    // Dashboard
+    if (dashboard) {
+        dashboard->render();
     }
 
     // RetroShell console

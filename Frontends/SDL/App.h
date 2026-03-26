@@ -13,6 +13,7 @@
 #include "Infrastructure/Constants.h"
 #include "SDLAudio.h"
 #include "ConfigPanel.h"
+#include "Dashboard.h"
 #include "KeyMap.h"
 
 #include <SDL3/SDL.h>
@@ -49,6 +50,7 @@ class App {
     VAmiga emu;
     SDLAudio audio;
     std::unique_ptr<ConfigPanel> configPanel;
+    std::unique_ptr<Dashboard> dashboard;
 
     //
     // SDL resources
@@ -173,6 +175,7 @@ private:
     void renderEmuWindow();
     void renderEmuWindowDecorated();
     void renderRetroShell();
+    void renderDashboard();
 
     //
     // Message callback
